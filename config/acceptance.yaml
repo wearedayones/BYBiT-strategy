@@ -1,0 +1,15 @@
+min_oos_sharpe: 0.8
+
+max_drawdown: 0.15
+
+min_trades_oos: 30
+
+pbo_ceiling: 0.45
+
+cost_multiplier: 1.5
+
+champion_margin: 0.05
+
+decay_threshold: 0.5
+
+min_dsr: 0.65

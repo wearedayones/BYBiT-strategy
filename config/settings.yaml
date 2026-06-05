@@ -1,0 +1,19 @@
+mode: research
+
+symbols:
+  - BTCUSDT
+  - ETHUSDT
+  - SOLUSDT
+
+timeframe: "15"
+
+research_budget:
+  max_trials: 50
+  max_hours: 4
+
+mcp_server: "http://localhost:3000"
+
+hard_limits:
+  max_leverage: 5
+  max_position_pct: 0.10
+  daily_loss_limit_pct: 0.02
