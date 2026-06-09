@@ -1,95 +1,80 @@
-# AGENTS.md — Bybit Quant Agent
+# AGENTS.md — Multi-Agent Liquidity Sweep & Event-Driven Bracket
 
-The MCP executes; it never decides. `engine/` owns every number that defines truth.
-The agent's job is the *thinking* (which strategy, which workflow) — not the math, and
-not the order plumbing.
+## Strategy overview
+
+Two complementary edges, one coherent system:
+
+1. **Liquidity sweep** — detect when price wicks through a stop-cluster (equal highs/lows,
+   swing extremes) and reverses. Enter in the direction of the rejection.
+2. **Event bracket** — before a scheduled event (funding reset, session open), detect a
+   tight pre-event consolidation and place bracket stop-orders on both sides. The breakout
+   direction is unknown; the bracket captures it.
+
+The MCP handles all exchange I/O. `engine/` owns all math. The agents decide.
 
 ## Quick start
 
 ```bash
-bash scripts/research.sh      # research mode — generate & validate strategies
-bash scripts/trade.sh         # live mode — run promoted strategies only
-bash scripts/kill_switch.sh   # emergency: HALT flag + flatten everything
-```
-
-## Modes
-
-### research
-Generates, backtests, validates, and gates strategies. **Places no real orders.**
-Reads `config/settings.yaml` (`mode: research`) and routes via `skills/strategy/SKILL.md`.
-Writes to `strategies/candidates.jsonl` and — only on gate pass — `strategies/promoted/`.
-
-### live
-Monitors positions and executes signals from **promoted strategies only**.
-If `strategies/promoted/` is empty, the agent does nothing and exits.
-Checks the HALT flag first on every loop iteration.
-
-## MCP authentication
-
-```bash
 export BYBIT_API_KEY="..."
 export BYBIT_API_SECRET="..."
-export BYBIT_TESTNET="true"     # "false" for mainnet
+export BYBIT_TESTNET="true"
+bash scripts/start.sh
 ```
 
-The MCP server endpoint is set in `config/settings.yaml → mcp_server`. The MCP handles
-klines, market data, account, positions, order placement, websocket streams, and
-copy-trading. The agent calls the MCP for all of it and reconstructs none of it by hand.
+Kill switch: `bash scripts/kill_switch.sh [reason]`
+
+## Agent roles
+
+| Agent | File | Responsibility |
+|---|---|---|
+| **Orchestrator** | `agents/orchestrator.md` | State machine, routes to subagents, enforces decision hierarchy |
+| **Liquidity Scanner** | `agents/liquidity-scanner.md` | Runs `engine/liquidity.scan()` on fresh klines; reports sweep signals |
+| **Event Monitor** | `agents/event-monitor.md` | Watches the event schedule; detects pre-event consolidations |
+| **Trade Manager** | `agents/trade-manager.md` | Manages open brackets and sweep trades; handles exits and adjustments |
+| **Risk Guard** | `agents/risk-guard.md` | Cross-cutting; every trade action passes through it before execution |
+
+**Decision hierarchy**: Risk Guard > Orchestrator > other agents.
+The Risk Guard can veto any action. The Orchestrator can override sub-signals but not the Risk Guard.
 
 ## Hard risk limits — NON-NEGOTIABLE
 
-The LLM cannot override these. They are enforced in `strategies/spec.py` Pydantic
-validators **and** re-checked in `skills/strategy/workflows/live-loop.md` Step 5.
+| Parameter | Limit |
+|---|---|
+| max_position_pct per leg | 5% NAV |
+| max_leverage | 3x |
+| daily_loss_limit_pct | 2% NAV |
+| max_concurrent_positions | 4 (all legs combined) |
+| max_stop_pct (sweep) | 1.5% from entry |
+| max_stop_pct (bracket) | 2% from entry |
+| min_rr | 1.5 |
 
-| Parameter             | Hard limit  |
-|-----------------------|-------------|
-| max_leverage          | 5x          |
-| max_position_pct      | 10% of NAV  |
-| daily_loss_limit_pct  | 2% of NAV   |
+All of these are enforced in `engine/risk.py`. The agents never recompute them.
 
-If the daily loss limit is hit, the agent MUST trigger the kill switch immediately and
-stop all activity for the calendar day.
+## HALT flag
 
-## Kill switch
-
-Trigger: `bash scripts/kill_switch.sh [reason]`
-
-What it does, in order (it does **not** depend on the agent cooperating):
-1. Writes the `.halt` flag atomically to the project root.
-2. Cancels all open orders via direct REST (`scripts/_flat_positions.py`).
-3. Market-closes all positions via direct REST.
-4. Logs timestamp and reason to `.halt.log`.
-
-How the agent checks it (every live iteration):
+Written atomically by `scripts/kill_switch.sh`. Every agent loop iteration begins:
 
 ```python
-import os
-if os.path.exists(".halt"):
-    raise SystemExit(0)   # do nothing — no orders, no signals, no decisions
+from engine.risk import check_halt
+result = check_halt()
+if not result.approved:
+    raise SystemExit(0)
 ```
 
-The agent never deletes `.halt`. Only a human removes it to resume trading.
+The agents never delete `.halt`. Only a human removes it.
 
-## The agent MAY
+## What agents MAY do
 
-- Call MCP tools to fetch klines, account info, and positions.
-- Call MCP tools to place orders — **live mode, promoted strategies only**.
-- Run `engine/backtest.py`, `engine/validation.py`, `engine/gate.py`.
-- Read/write `strategies/candidates.jsonl` and `strategies/promoted/`.
-- Read `config/`.
+- Call MCP to fetch klines, account info, positions
+- Call MCP to place / cancel orders (only after Risk Guard approval)
+- Call `engine/liquidity`, `engine/bracket`, `engine/events`, `engine/risk` directly
+- Read `config/`, `state/`
+- Write `state/daily_pnl.json` (via `engine/risk.record_trade_pnl`)
 
-## The agent MUST NOT
+## What agents MUST NOT do
 
-- Compute trading math (Sharpe, drawdown, PBO, DSR) itself — always call `engine/`.
-- Run unvalidated strategies in live mode — `promoted/` only.
-- Override or weaken risk limits.
-- Delete the `.halt` file.
-- Edit `engine/backtest.py`, `engine/validation.py`, `engine/gate.py`, or `strategies/spec.py`.
-- Place orders in research mode, or ignore the HALT flag.
-
-## Rule that survives the minimalism
-
-> **Live mode loads ONLY `strategies/promoted/`.** It never instantiates a strategy
-> from the agent's context window. If `promoted/` is empty, the agent exits cleanly.
-> The moment the gate's math runs through the LLM or an external tool, "it passed"
-> stops meaning anything — so `engine/` stays pure Python with tests.
+- Compute risk, sizing, or level math themselves — always call `engine/`
+- Place an order before `engine/risk.run_all_checks` returns approved
+- Modify `engine/` source files
+- Delete `.halt`
+- Run `engine/liquidity` without fresh klines from MCP

@@ -1,0 +1,18 @@
+# Hard limits — enforced in engine/risk.py and CANNOT be overridden by the agent
+
+max_position_pct: 0.05          # 5% of NAV per leg
+max_leverage: 3                 # 3x max for bracket legs
+daily_loss_limit_pct: 0.02      # 2% NAV daily loss → kill switch
+max_concurrent_positions: 4     # total open legs across all brackets and sweeps
+risk_per_trade_pct: 0.01        # 1% of NAV risked per trade (stop-to-entry distance)
+
+# Sweep-specific risk
+sweep:
+  max_stop_pct: 0.015           # stop never more than 1.5% from entry
+  min_rr: 1.5                   # reject sweeps with reward:risk < 1.5
+
+# Bracket-specific risk
+bracket:
+  max_stop_pct: 0.02            # stop = opposite range boundary (capped at 2%)
+  target1_rr: 1.0               # take 50% at R:R 1.0
+  target2_rr: 2.0               # take remainder at R:R 2.0

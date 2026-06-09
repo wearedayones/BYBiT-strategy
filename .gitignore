@@ -1,39 +1,27 @@
-# Operational state — not code
-.halt
-.halt.log
-
-# API keys
-.env
-*.env
-
 # Python
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-dist/
-build/
-.eggs/
-
-# Test / coverage
 .coverage
 .coverage.*
 htmlcov/
 .pytest_cache/
-
-# Virtual envs
+*.egg-info/
+dist/
+build/
 .venv/
 venv/
-env/
 
-# Editor
+# Operational state
+.halt
+.halt.log
+state/daily_pnl.json
+
+# Secrets
+.env
+*.env
+
+# Editor / OS
 .idea/
 .vscode/
 *.swp
-*.swo
-
-# OS
 .DS_Store
-Thumbs.db

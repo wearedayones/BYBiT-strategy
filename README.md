@@ -1,64 +1,79 @@
-# bybit-quant-agent
+# Multi-Agent Liquidity Sweep & Event-Driven Bracket
 
-A minimal quantitative trading agent for Bybit. The MCP handles all exchange work —
-klines, market data, account, positions, order placement, websocket streams,
-copy-trading. This repo keeps only what can't be safely outsourced: the **thinking**
-(`skills/`) and the **math that defines truth** (`engine/`).
+Two complementary edges, one coherent system built on top of the Bybit MCP.
 
-> The MCP executes, but it never decides. `engine/` stays pure Python with tests,
-> because the moment the gate's math runs through the LLM or an external tool,
-> "it passed" stops meaning anything.
+## The two edges
 
-## Layout
+**Liquidity sweep** — crypto markets regularly hunt stop clusters before reversing.
+Equal highs, equal lows, and swing extremes accumulate stops. When price wicks through
+one of these levels and closes back on the originating side, the stops are cleared and
+the order flow reverses. `engine/liquidity.py` detects the wick-through and rejection;
+the Liquidity Scanner agent filters for confidence and freshness.
+
+**Event bracket** — before funding resets (00:00/08:00/16:00 UTC) and major session opens,
+price often consolidates in a tight range as participants square up. The breakout
+direction is unpredictable — so we bracket it. `engine/bracket.py` detects the
+consolidation and computes the bracket levels; `engine/events.py` owns the schedule.
+When one side fills, the other is immediately cancelled.
+
+## Architecture
 
 ```
-bybit-quant-agent/
-├── AGENTS.md               # modes, MCP auth, hard risk limits, kill switch
-├── config/
-│   ├── settings.yaml       # mode, symbols, timeframe, research budget
-│   └── acceptance.yaml     # the gate: min OOS Sharpe, max DD, PBO ceiling, …
-├── skills/strategy/        # the thinking
-│   ├── SKILL.md            # router: pick family → pick workflow
-│   ├── references/         # futures · spot · copy-trading · trading-bots
-│   ├── workflows/          # research.md · live-loop.md
-│   └── subagents/          # trade-validator.md
-├── engine/                 # deterministic — what MCP and the LLM must NOT compute
-│   ├── backtest.py         # consumes MCP klines; fees + slippage + funding
-│   ├── validation.py       # CPCV + purge/embargo + deflated Sharpe + PBO + regime
-│   └── gate.py             # acceptance.yaml → promote/reject + champion/challenger + decay
-├── strategies/
-│   ├── spec.py             # schema with a REQUIRED thesis field
-│   ├── promoted/           # saved passers (live runs only these)
-│   └── candidates.jsonl    # every trial + result (feeds trial-aware PBO/DSR)
-├── scripts/                # research.sh · trade.sh · kill_switch.sh
-└── tests/                  # test_validation.py · test_backtest.py
+agents/
+  orchestrator.md       # state machine + decision hierarchy
+  liquidity-scanner.md  # calls engine/liquidity.scan(); reports sweep signals
+  event-monitor.md      # calls engine/events + engine/bracket; reports bracket specs
+  trade-manager.md      # partial exits, trailing stops, bracket leg cancellation
+  risk-guard.md         # cross-cutting veto; every order passes through here
+
+engine/                 # deterministic pure Python — no LLM, no MCP
+  liquidity.py          # swing detection, equal-level clustering, sweep detection, order blocks
+  bracket.py            # consolidation detection, bracket level math, position sizing
+  events.py             # funding + session event schedule, pre-event window detection
+  risk.py               # all hard limits, daily loss tracking, HALT check
+
+skills/sweep-bracket/
+  SKILL.md              # router + agent invocation order
+  workflows/scan.md     # sweep scan loop
+  workflows/bracket.md  # bracket placement workflow
+  workflows/unwind.md   # graceful shutdown
+
+config/
+  settings.yaml         # symbols, timeframes, sweep + bracket parameters
+  risk.yaml             # hard limits (5% NAV, 3x leverage, 2% daily loss)
+
+state/
+  daily_pnl.json        # persisted daily P&L state (reset at 00:00 UTC)
+
+scripts/
+  kill_switch.sh        # HALT flag + immediate flatten (no agent dependency)
+  start.sh              # prerequisite check + handoff
 ```
-
-## The two design upgrades
-
-1. **`engine/validation.py`** — CPCV (combinatorial purged cross-validation) +
-   deflated Sharpe ratio + probability of backtest overfitting. This is the integrity
-   gate against luck and multiple-testing.
-2. **`strategies/spec.py`** — a **required `thesis` field** enforces hypothesis-first
-   research. No thesis (or boilerplate) → the spec won't construct.
-
-`engine/gate.py` absorbs champion-vs-challenger and decay monitoring — promoting a
-challenger over an incumbent and retiring a decayed strategy are just the same gate run
-on fresh data.
 
 ## Quick start
 
 ```bash
 pip install -e ".[dev]"
-pytest                          # run the engine test suite
+pytest                          # verify engine
 
-export BYBIT_API_KEY="..."      # see AGENTS.md for full auth + MCP setup
+export BYBIT_API_KEY="..."
 export BYBIT_API_SECRET="..."
 export BYBIT_TESTNET="true"
-
-bash scripts/research.sh        # find & validate strategies
-bash scripts/trade.sh           # run promoted strategies live
-bash scripts/kill_switch.sh     # emergency flatten + HALT
+bash scripts/start.sh           # hands off to agent
 ```
 
-See `AGENTS.md` for modes, hard risk limits, and the kill switch contract.
+Emergency stop at any time: `bash scripts/kill_switch.sh`
+
+## Hard limits (non-negotiable)
+
+All enforced in `engine/risk.py`. The agent calls these; it never recomputes them.
+
+| Limit | Value |
+|---|---|
+| Position size per leg | 5% of NAV |
+| Max leverage | 3x |
+| Daily loss limit | 2% of NAV → kill switch |
+| Max concurrent positions | 4 legs |
+| Min R:R | 1.5 |
+| Max stop distance (sweep) | 1.5% |
+| Max stop distance (bracket) | 2% |
